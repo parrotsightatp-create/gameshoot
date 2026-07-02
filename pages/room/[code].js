@@ -11,8 +11,12 @@ const CHAR_MAP = {
 };
 
 const OPPONENT_CHAR = CHAR_MAP.robot;
-
 const MAX_HP = 3;
+const ARENA_W = 320; // px, matches CSS .arena inner width roughly
+const ARENA_H = 220;
+const AVATAR = 40;
+const STEP = 24;
+const HIT_DISTANCE = 90;
 
 export default function Room() {
   const router = useRouter();
@@ -21,6 +25,8 @@ export default function Room() {
   const [myChar, setMyChar] = useState('monster');
   const [myHp, setMyHp] = useState(MAX_HP);
   const [opHp, setOpHp] = useState(MAX_HP);
+  const [myPos, setMyPos] = useState({ x: 20, y: ARENA_H - AVATAR - 20 });
+  const [opPos, setOpPos] = useState({ x: ARENA_W - AVATAR - 20, y: 20 });
   const [pressed, setPressed] = useState(false);
   const [toast, setToast] = useState('');
   const [gameOver, setGameOver] = useState(null); // 'win' | 'lose' | null
@@ -40,13 +46,27 @@ export default function Room() {
     navigator.clipboard.writeText(String(code)).then(() => showToast('房间号已复制'));
   }
 
+  function move(dx, dy) {
+    if (gameOver) return;
+    setMyPos((p) => ({
+      x: Math.max(0, Math.min(ARENA_W - AVATAR, p.x + dx)),
+      y: Math.max(0, Math.min(ARENA_H - AVATAR, p.y + dy)),
+    }));
+    // demo阶段：对手随机小幅走动，真联网后这里会换成读取对方的真实位置
+    setOpPos((p) => ({
+      x: Math.max(0, Math.min(ARENA_W - AVATAR, p.x + (Math.random() - 0.5) * 30)),
+      y: Math.max(0, Math.min(ARENA_H - AVATAR, p.y + (Math.random() - 0.5) * 30)),
+    }));
+  }
+
   function fire() {
     if (gameOver) return;
     setPressed(true);
     setTimeout(() => setPressed(false), 150);
 
-    // demo逻辑：随机判定命中，真正联网对战时这里会换成读取对方实际状态
-    const hit = Math.random() > 0.4;
+    const dist = Math.hypot(myPos.x - opPos.x, myPos.y - opPos.y);
+    const hit = dist < HIT_DISTANCE;
+
     if (hit) {
       showToast('命中对手！');
       setOpHp((h) => {
@@ -55,20 +75,15 @@ export default function Room() {
         return next;
       });
     } else {
-      showToast('打空了');
-      setTimeout(() => {
-        setMyHp((h) => {
-          const next = Math.max(0, h - 1);
-          if (next === 0) setGameOver('lose');
-          return next;
-        });
-      }, 500);
+      showToast('打空了，靠近点再试');
     }
   }
 
   function restart() {
     setMyHp(MAX_HP);
     setOpHp(MAX_HP);
+    setMyPos({ x: 20, y: ARENA_H - AVATAR - 20 });
+    setOpPos({ x: ARENA_W - AVATAR - 20, y: 20 });
     setGameOver(null);
   }
 
@@ -109,13 +124,28 @@ export default function Room() {
         </div>
       </div>
 
+      <div className="arena">
+        <div
+          className="arena-avatar"
+          style={{ left: myPos.x, top: myPos.y }}
+        >
+          <img src={me.img} alt={me.name} />
+        </div>
+        <div
+          className="arena-avatar opponent"
+          style={{ left: opPos.x, top: opPos.y }}
+        >
+          <img src={OPPONENT_CHAR.img} alt={OPPONENT_CHAR.name} />
+        </div>
+      </div>
+
       <div className="card">
         <div className="control-row">
           <div className="dpad">
-            <button className="dpad-btn up">▲</button>
-            <button className="dpad-btn left">◀</button>
-            <button className="dpad-btn right">▶</button>
-            <button className="dpad-btn down">▼</button>
+            <button className="dpad-btn up" onClick={() => move(0, -STEP)}>▲</button>
+            <button className="dpad-btn left" onClick={() => move(-STEP, 0)}>◀</button>
+            <button className="dpad-btn right" onClick={() => move(STEP, 0)}>▶</button>
+            <button className="dpad-btn down" onClick={() => move(0, STEP)}>▼</button>
           </div>
 
           <div
