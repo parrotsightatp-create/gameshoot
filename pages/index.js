@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { useRouter } from 'next/router';
+import { supabase } from '../lib/supabaseClient';
 
 const CHARACTERS = [
   { id: 'monster', name: '小怪兽', img: '/characters/monster.png' },
@@ -16,23 +17,56 @@ function makeRoomCode() {
 
 export default function Home() {
   const router = useRouter();
-  const [selected, setSelected] = useState('bolt');
+  const [selected, setSelected] = useState('monster');
   const [joinCode, setJoinCode] = useState('');
+  const [joinError, setJoinError] = useState('');
+  const [busy, setBusy] = useState(false);
 
-  function handleCreate() {
+  async function handleCreate() {
+    setBusy(true);
     const code = makeRoomCode();
-    if (typeof window !== 'undefined') {
-      window.localStorage.setItem('myCharacter', selected);
+    const { error } = await supabase.from('rooms').insert({
+      code,
+      host_char: selected,
+      guest_char: null,
+    });
+    setBusy(false);
+    if (error) {
+      setJoinError('创建房间失败，请重试');
+      return;
     }
-    router.push(`/room/${code}?host=1`);
+    router.push(`/room/${code}?host=1&char=${selected}`);
   }
 
-  function handleJoin() {
+  async function handleJoin() {
     if (!joinCode || joinCode.length < 4) return;
-    if (typeof window !== 'undefined') {
-      window.localStorage.setItem('myCharacter', selected);
+    setBusy(true);
+    setJoinError('');
+
+    const { data, error } = await supabase
+      .from('rooms')
+      .select('*')
+      .eq('code', joinCode)
+      .single();
+
+    if (error || !data) {
+      setBusy(false);
+      setJoinError('房间不存在，请检查房间号');
+      return;
     }
-    router.push(`/room/${joinCode}`);
+
+    const { error: updateError } = await supabase
+      .from('rooms')
+      .update({ guest_char: selected })
+      .eq('code', joinCode);
+
+    setBusy(false);
+    if (updateError) {
+      setJoinError('加入房间失败，请重试');
+      return;
+    }
+
+    router.push(`/room/${joinCode}?char=${selected}`);
   }
 
   return (
@@ -59,7 +93,9 @@ export default function Home() {
 
       <div className="card">
         <div className="title" style={{ fontSize: 15 }}>创建新房间</div>
-        <button className="btn blue" onClick={handleCreate}>创建房间</button>
+        <button className="btn blue" onClick={handleCreate} disabled={busy}>
+          创建房间
+        </button>
       </div>
 
       <div className="card">
@@ -71,7 +107,14 @@ export default function Home() {
           onChange={(e) => setJoinCode(e.target.value.replace(/\D/g, ''))}
           maxLength={6}
         />
-        <button className="btn yellow" onClick={handleJoin}>加入房间</button>
+        {joinError && (
+          <div style={{ color: '#ff9b9b', fontSize: 13, marginBottom: 10, textAlign: 'center' }}>
+            {joinError}
+          </div>
+        )}
+        <button className="btn yellow" onClick={handleJoin} disabled={busy}>
+          加入房间
+        </button>
       </div>
     </div>
   );

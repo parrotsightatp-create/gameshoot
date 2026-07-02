@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/router';
+import { supabase } from '../../lib/supabaseClient';
 
 const CHAR_MAP = {
   monster: { name: '小怪兽', img: '/characters/monster.png' },
@@ -10,53 +11,123 @@ const CHAR_MAP = {
   karate: { name: '空手道', img: '/characters/karate.png' },
 };
 
-const OPPONENT_CHAR = CHAR_MAP.robot;
 const MAX_HP = 3;
-const ARENA_W = 320; // px, matches CSS .arena inner width roughly
+const ARENA_W = 320;
 const ARENA_H = 220;
 const AVATAR = 40;
 const STEP = 24;
 const HIT_DISTANCE = 90;
 
+const HOST_START = { x: 20, y: ARENA_H - AVATAR - 20 };
+const GUEST_START = { x: ARENA_W - AVATAR - 20, y: 20 };
+
 export default function Room() {
   const router = useRouter();
-  const { code } = router.query;
+  const { code, host, char } = router.query;
+  const isHost = host === '1';
 
-  const [myChar, setMyChar] = useState('monster');
+  const [hostChar, setHostChar] = useState(null);
+  const [guestChar, setGuestChar] = useState(null);
   const [myHp, setMyHp] = useState(MAX_HP);
   const [opHp, setOpHp] = useState(MAX_HP);
-  const [myPos, setMyPos] = useState({ x: 20, y: ARENA_H - AVATAR - 20 });
-  const [opPos, setOpPos] = useState({ x: ARENA_W - AVATAR - 20, y: 20 });
+  const [myPos, setMyPos] = useState(isHost ? HOST_START : GUEST_START);
+  const [opPos, setOpPos] = useState(isHost ? GUEST_START : HOST_START);
   const [pressed, setPressed] = useState(false);
   const [toast, setToast] = useState('');
-  const [gameOver, setGameOver] = useState(null); // 'win' | 'lose' | null
+  const [gameOver, setGameOver] = useState(null);
 
-  useEffect(() => {
-    const saved = typeof window !== 'undefined' ? window.localStorage.getItem('myCharacter') : null;
-    if (saved && CHAR_MAP[saved]) setMyChar(saved);
-  }, []);
+  const channelRef = useRef(null);
+  const myPosRef = useRef(myPos);
+  const opPosRef = useRef(opPos);
+  myPosRef.current = myPos;
+  opPosRef.current = opPos;
 
   function showToast(text) {
     setToast(text);
     setTimeout(() => setToast(''), 1400);
   }
 
-  function copyRoomCode() {
+  // 监听房间数据（谁加入了、双方选了什么角色）
+  useEffect(() => {
     if (!code) return;
-    navigator.clipboard.writeText(String(code)).then(() => showToast('房间号已复制'));
-  }
+
+    supabase
+      .from('rooms')
+      .select('*')
+      .eq('code', code)
+      .single()
+      .then(({ data }) => {
+        if (data) {
+          setHostChar(data.host_char);
+          setGuestChar(data.guest_char);
+        }
+      });
+
+    const dbSub = supabase
+      .channel(`room-db-${code}`)
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'rooms', filter: `code=eq.${code}` },
+        (payload) => {
+          setHostChar(payload.new.host_char);
+          if (payload.new.guest_char && !guestChar) {
+            showToast('对方已加入');
+          }
+          setGuestChar(payload.new.guest_char);
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(dbSub);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [code]);
+
+  // 实时对战频道：同步移动、开火、血量
+  useEffect(() => {
+    if (!code) return;
+
+    const gameChannel = supabase.channel(`room-game-${code}`, {
+      config: { broadcast: { self: false } },
+    });
+
+    gameChannel
+      .on('broadcast', { event: 'move' }, ({ payload }) => {
+        setOpPos(payload.pos);
+      })
+      .on('broadcast', { event: 'hit' }, () => {
+        setMyHp((h) => {
+          const next = Math.max(0, h - 1);
+          gameChannel.send({ type: 'broadcast', event: 'hpUpdate', payload: { hp: next } });
+          if (next === 0) setGameOver('lose');
+          return next;
+        });
+        showToast('你被击中了');
+      })
+      .on('broadcast', { event: 'hpUpdate' }, ({ payload }) => {
+        setOpHp(payload.hp);
+        if (payload.hp === 0) setGameOver('win');
+      })
+      .subscribe();
+
+    channelRef.current = gameChannel;
+
+    return () => {
+      supabase.removeChannel(gameChannel);
+    };
+  }, [code]);
 
   function move(dx, dy) {
     if (gameOver) return;
-    setMyPos((p) => ({
-      x: Math.max(0, Math.min(ARENA_W - AVATAR, p.x + dx)),
-      y: Math.max(0, Math.min(ARENA_H - AVATAR, p.y + dy)),
-    }));
-    // demo阶段：对手随机小幅走动，真联网后这里会换成读取对方的真实位置
-    setOpPos((p) => ({
-      x: Math.max(0, Math.min(ARENA_W - AVATAR, p.x + (Math.random() - 0.5) * 30)),
-      y: Math.max(0, Math.min(ARENA_H - AVATAR, p.y + (Math.random() - 0.5) * 30)),
-    }));
+    setMyPos((p) => {
+      const next = {
+        x: Math.max(0, Math.min(ARENA_W - AVATAR, p.x + dx)),
+        y: Math.max(0, Math.min(ARENA_H - AVATAR, p.y + dy)),
+      };
+      channelRef.current?.send({ type: 'broadcast', event: 'move', payload: { pos: next } });
+      return next;
+    });
   }
 
   function fire() {
@@ -64,30 +135,50 @@ export default function Room() {
     setPressed(true);
     setTimeout(() => setPressed(false), 150);
 
-    const dist = Math.hypot(myPos.x - opPos.x, myPos.y - opPos.y);
-    const hit = dist < HIT_DISTANCE;
-
-    if (hit) {
+    const dist = Math.hypot(myPosRef.current.x - opPosRef.current.x, myPosRef.current.y - opPosRef.current.y);
+    if (dist < HIT_DISTANCE) {
       showToast('命中对手！');
-      setOpHp((h) => {
-        const next = Math.max(0, h - 1);
-        if (next === 0) setGameOver('win');
-        return next;
-      });
+      channelRef.current?.send({ type: 'broadcast', event: 'hit', payload: {} });
     } else {
       showToast('打空了，靠近点再试');
     }
   }
 
-  function restart() {
-    setMyHp(MAX_HP);
-    setOpHp(MAX_HP);
-    setMyPos({ x: 20, y: ARENA_H - AVATAR - 20 });
-    setOpPos({ x: ARENA_W - AVATAR - 20, y: 20 });
-    setGameOver(null);
+  function copyRoomCode() {
+    if (!code) return;
+    navigator.clipboard.writeText(String(code)).then(() => showToast('房间号已复制'));
   }
 
-  const me = CHAR_MAP[myChar];
+  const myCharId = char || (isHost ? hostChar : guestChar);
+  const opCharId = isHost ? guestChar : hostChar;
+  const me = CHAR_MAP[myCharId] || CHAR_MAP.monster;
+  const opponent = opCharId ? CHAR_MAP[opCharId] : null;
+  const waitingForOpponent = isHost && !guestChar;
+
+  if (waitingForOpponent) {
+    return (
+      <div className="page">
+        <div className="card room-card">
+          <div className="room-small">房间号</div>
+          <div className="room-num">{code}</div>
+          <button className="btn blue" onClick={copyRoomCode}>复制房间号</button>
+        </div>
+        <div className="card" style={{ textAlign: 'center', color: '#b9a7ff' }}>
+          等待对方加入…把房间号发给朋友
+        </div>
+      </div>
+    );
+  }
+
+  if (!opponent) {
+    return (
+      <div className="page">
+        <div className="card" style={{ textAlign: 'center', color: '#b9a7ff' }}>
+          正在连接房间…
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="page">
@@ -113,9 +204,9 @@ export default function Room() {
           <div className="vs">VS</div>
 
           <div className="player-block enemy">
-            <div className="avatar"><img src={OPPONENT_CHAR.img} alt={OPPONENT_CHAR.name} /></div>
+            <div className="avatar"><img src={opponent.img} alt={opponent.name} /></div>
             <div className="hp-stack">
-              <div className="label-row"><span>{opHp}/{MAX_HP}</span><span>小明 · {OPPONENT_CHAR.name}</span></div>
+              <div className="label-row"><span>{opHp}/{MAX_HP}</span><span>对手 · {opponent.name}</span></div>
               <div className="hp-bar">
                 <div className="hp-fill" style={{ width: `${(opHp / MAX_HP) * 100}%` }} />
               </div>
@@ -125,17 +216,11 @@ export default function Room() {
       </div>
 
       <div className="arena">
-        <div
-          className="arena-avatar"
-          style={{ left: myPos.x, top: myPos.y }}
-        >
+        <div className="arena-avatar" style={{ left: myPos.x, top: myPos.y }}>
           <img src={me.img} alt={me.name} />
         </div>
-        <div
-          className="arena-avatar opponent"
-          style={{ left: opPos.x, top: opPos.y }}
-        >
-          <img src={OPPONENT_CHAR.img} alt={OPPONENT_CHAR.name} />
+        <div className="arena-avatar opponent" style={{ left: opPos.x, top: opPos.y }}>
+          <img src={opponent.img} alt={opponent.name} />
         </div>
       </div>
 
@@ -148,10 +233,7 @@ export default function Room() {
             <button className="dpad-btn down" onClick={() => move(0, STEP)}>▼</button>
           </div>
 
-          <div
-            className={`fire-btn ${pressed ? 'pressed' : ''}`}
-            onClick={fire}
-          >
+          <div className={`fire-btn ${pressed ? 'pressed' : ''}`} onClick={fire}>
             🎯
           </div>
         </div>
@@ -167,7 +249,6 @@ export default function Room() {
               {gameOver === 'win' ? '胜利' : '失败'}
             </div>
             <div className="btn-row">
-              <button className="btn blue" onClick={restart}>再来一局</button>
               <button className="btn yellow" onClick={() => router.push('/')}>返回大厅</button>
             </div>
           </div>
