@@ -163,8 +163,8 @@ body {
 
 .arena-avatar {
   position: absolute;
-  width: 40px;
-  height: 40px;
+  width: 44px;
+  height: 44px;
   border-radius: 10px;
   overflow: hidden;
   box-shadow: 0 2px 6px rgba(0,0,0,0.4);
@@ -179,6 +179,31 @@ body {
 
 .arena-avatar.opponent {
   transition: left 0.4s ease, top 0.4s ease;
+}
+
+.side-arena {
+  background: linear-gradient(180deg, #1c1244 0%, #160c33 70%);
+}
+
+.ground-line {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 10px;
+  background: linear-gradient(180deg, #3a2a7a, #241659);
+  border-top: 2px solid rgba(255,255,255,0.15);
+}
+
+.side-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.jetpack-btn {
+  background: linear-gradient(180deg, #ff9d5b, #e85a2a) !important;
+  box-shadow: 0 0 16px rgba(255,140,50,0.5) !important;
 }
 
 /* Controls */

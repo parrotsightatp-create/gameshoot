@@ -14,12 +14,24 @@ const CHAR_MAP = {
 const MAX_HP = 3;
 const ARENA_W = 320;
 const ARENA_H = 220;
-const AVATAR = 40;
-const STEP = 24;
-const HIT_DISTANCE = 90;
+const AVATAR = 44;
+const GROUND_Y = 0; // y = 高度，0代表站在地面上
+const MAX_HEIGHT = ARENA_H - AVATAR - 10;
 
-const HOST_START = { x: 20, y: ARENA_H - AVATAR - 20 };
-const GUEST_START = { x: ARENA_W - AVATAR - 20, y: 20 };
+const GRAVITY = -1.4;
+const THRUST = 1.8;
+const MAX_RISE = 6;
+const MAX_FALL = -10;
+const MOVE_SPEED = 5;
+
+const HIT_RANGE_X = 90;
+const HIT_RANGE_Y = 40;
+
+const HOST_START_X = 30;
+const GUEST_START_X = ARENA_W - AVATAR - 30;
+
+const TICK_MS = 33;
+const BROADCAST_EVERY_N_TICKS = 3; // 节流：每3帧才广播一次位置，减少网络压力
 
 export default function Room() {
   const router = useRouter();
@@ -30,38 +42,38 @@ export default function Room() {
   const [guestChar, setGuestChar] = useState(null);
   const [myHp, setMyHp] = useState(MAX_HP);
   const [opHp, setOpHp] = useState(MAX_HP);
-  const [myPos, setMyPos] = useState(isHost ? HOST_START : GUEST_START);
-  const [opPos, setOpPos] = useState(isHost ? GUEST_START : HOST_START);
+  const [myX, setMyX] = useState(isHost ? HOST_START_X : GUEST_START_X);
+  const [myY, setMyY] = useState(GROUND_Y);
+  const [myFacing, setMyFacing] = useState(isHost ? 'right' : 'left');
+  const [opX, setOpX] = useState(isHost ? GUEST_START_X : HOST_START_X);
+  const [opY, setOpY] = useState(GROUND_Y);
+  const [opFacing, setOpFacing] = useState(isHost ? 'left' : 'right');
   const [pressed, setPressed] = useState(false);
   const [toast, setToast] = useState('');
   const [gameOver, setGameOver] = useState(null);
 
   const channelRef = useRef(null);
-  const myPosRef = useRef(myPos);
-  const opPosRef = useRef(opPos);
-  myPosRef.current = myPos;
-  opPosRef.current = opPos;
+  const stateRef = useRef({ x: myX, y: GROUND_Y, vy: 0, facing: myFacing });
+  const inputRef = useRef({ left: false, right: false, thrust: false });
+  const tickCountRef = useRef(0);
+  const opStateRef = useRef({ x: opX, y: opY });
+  opStateRef.current = { x: opX, y: opY };
 
   function showToast(text) {
     setToast(text);
     setTimeout(() => setToast(''), 1400);
   }
 
-  // 监听房间数据（谁加入了、双方选了什么角色）
+  // 房间信息监听
   useEffect(() => {
     if (!code) return;
 
-    supabase
-      .from('rooms')
-      .select('*')
-      .eq('code', code)
-      .single()
-      .then(({ data }) => {
-        if (data) {
-          setHostChar(data.host_char);
-          setGuestChar(data.guest_char);
-        }
-      });
+    supabase.from('rooms').select('*').eq('code', code).single().then(({ data }) => {
+      if (data) {
+        setHostChar(data.host_char);
+        setGuestChar(data.guest_char);
+      }
+    });
 
     const dbSub = supabase
       .channel(`room-db-${code}`)
@@ -70,21 +82,17 @@ export default function Room() {
         { event: 'UPDATE', schema: 'public', table: 'rooms', filter: `code=eq.${code}` },
         (payload) => {
           setHostChar(payload.new.host_char);
-          if (payload.new.guest_char && !guestChar) {
-            showToast('对方已加入');
-          }
+          if (payload.new.guest_char && !guestChar) showToast('对方已加入');
           setGuestChar(payload.new.guest_char);
         }
       )
       .subscribe();
 
-    return () => {
-      supabase.removeChannel(dbSub);
-    };
+    return () => supabase.removeChannel(dbSub);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [code]);
 
-  // 实时对战频道：同步移动、开火、血量
+  // 联网对战频道
   useEffect(() => {
     if (!code) return;
 
@@ -94,7 +102,9 @@ export default function Room() {
 
     gameChannel
       .on('broadcast', { event: 'move' }, ({ payload }) => {
-        setOpPos(payload.pos);
+        setOpX(payload.x);
+        setOpY(payload.y);
+        setOpFacing(payload.facing);
       })
       .on('broadcast', { event: 'hit' }, () => {
         setMyHp((h) => {
@@ -112,22 +122,55 @@ export default function Room() {
       .subscribe();
 
     channelRef.current = gameChannel;
-
-    return () => {
-      supabase.removeChannel(gameChannel);
-    };
+    return () => supabase.removeChannel(gameChannel);
   }, [code]);
 
-  function move(dx, dy) {
-    if (gameOver) return;
-    setMyPos((p) => {
-      const next = {
-        x: Math.max(0, Math.min(ARENA_W - AVATAR, p.x + dx)),
-        y: Math.max(0, Math.min(ARENA_H - AVATAR, p.y + dy)),
-      };
-      channelRef.current?.send({ type: 'broadcast', event: 'move', payload: { pos: next } });
-      return next;
-    });
+  // 物理引擎循环：跑动 + 喷气背包 + 重力
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (gameOver) return;
+      const s = stateRef.current;
+      const input = inputRef.current;
+
+      // 水平移动
+      if (input.left) {
+        s.x = Math.max(0, s.x - MOVE_SPEED);
+        s.facing = 'left';
+      }
+      if (input.right) {
+        s.x = Math.min(ARENA_W - AVATAR, s.x + MOVE_SPEED);
+        s.facing = 'right';
+      }
+
+      // 垂直：喷气背包推力 or 重力
+      s.vy += input.thrust ? THRUST : GRAVITY;
+      s.vy = Math.max(MAX_FALL, Math.min(MAX_RISE, s.vy));
+      s.y = Math.max(GROUND_Y, Math.min(MAX_HEIGHT, s.y + s.vy));
+      if (s.y <= GROUND_Y) {
+        s.y = GROUND_Y;
+        s.vy = 0;
+      }
+
+      setMyX(s.x);
+      setMyY(s.y);
+      setMyFacing(s.facing);
+
+      tickCountRef.current += 1;
+      if (tickCountRef.current % BROADCAST_EVERY_N_TICKS === 0) {
+        channelRef.current?.send({
+          type: 'broadcast',
+          event: 'move',
+          payload: { x: s.x, y: s.y, facing: s.facing },
+        });
+      }
+    }, TICK_MS);
+
+    return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gameOver]);
+
+  function setInput(key, value) {
+    inputRef.current[key] = value;
   }
 
   function fire() {
@@ -135,12 +178,18 @@ export default function Room() {
     setPressed(true);
     setTimeout(() => setPressed(false), 150);
 
-    const dist = Math.hypot(myPosRef.current.x - opPosRef.current.x, myPosRef.current.y - opPosRef.current.y);
-    if (dist < HIT_DISTANCE) {
+    const s = stateRef.current;
+    const op = opStateRef.current;
+    const dx = op.x - s.x;
+    const dy = Math.abs(op.y - s.y);
+    const facingCorrect = (s.facing === 'right' && dx > 0) || (s.facing === 'left' && dx < 0);
+    const inRange = Math.abs(dx) < HIT_RANGE_X && dy < HIT_RANGE_Y;
+
+    if (facingCorrect && inRange) {
       showToast('命中对手！');
       channelRef.current?.send({ type: 'broadcast', event: 'hit', payload: {} });
     } else {
-      showToast('打空了，靠近点再试');
+      showToast('打空了');
     }
   }
 
@@ -215,27 +264,70 @@ export default function Room() {
         </div>
       </div>
 
-      <div className="arena">
-        <div className="arena-avatar" style={{ left: myPos.x, top: myPos.y }}>
+      <div className="arena side-arena">
+        <div className="ground-line" />
+        <div
+          className="arena-avatar"
+          style={{
+            left: myX,
+            bottom: myY,
+            top: 'auto',
+            transform: myFacing === 'left' ? 'scaleX(-1)' : 'none',
+          }}
+        >
           <img src={me.img} alt={me.name} />
         </div>
-        <div className="arena-avatar opponent" style={{ left: opPos.x, top: opPos.y }}>
+        <div
+          className="arena-avatar opponent"
+          style={{
+            left: opX,
+            bottom: opY,
+            top: 'auto',
+            transform: opFacing === 'left' ? 'scaleX(-1)' : 'none',
+          }}
+        >
           <img src={opponent.img} alt={opponent.name} />
         </div>
       </div>
 
       <div className="card">
         <div className="control-row">
-          <div className="dpad">
-            <button className="dpad-btn up" onClick={() => move(0, -STEP)}>▲</button>
-            <button className="dpad-btn left" onClick={() => move(-STEP, 0)}>◀</button>
-            <button className="dpad-btn right" onClick={() => move(STEP, 0)}>▶</button>
-            <button className="dpad-btn down" onClick={() => move(0, STEP)}>▼</button>
+          <div className="side-controls">
+            <button
+              className="dpad-btn"
+              style={{ position: 'static' }}
+              onPointerDown={() => setInput('left', true)}
+              onPointerUp={() => setInput('left', false)}
+              onPointerLeave={() => setInput('left', false)}
+            >
+              ◀
+            </button>
+            <button
+              className="dpad-btn"
+              style={{ position: 'static' }}
+              onPointerDown={() => setInput('right', true)}
+              onPointerUp={() => setInput('right', false)}
+              onPointerLeave={() => setInput('right', false)}
+            >
+              ▶
+            </button>
+            <button
+              className="dpad-btn jetpack-btn"
+              style={{ position: 'static' }}
+              onPointerDown={() => setInput('thrust', true)}
+              onPointerUp={() => setInput('thrust', false)}
+              onPointerLeave={() => setInput('thrust', false)}
+            >
+              🚀
+            </button>
           </div>
 
           <div className={`fire-btn ${pressed ? 'pressed' : ''}`} onClick={fire}>
             🎯
           </div>
+        </div>
+        <div className="hint" style={{ textAlign: 'center', marginTop: 8 }}>
+          左右移动，按住🚀上升，松开下降
         </div>
       </div>
 
