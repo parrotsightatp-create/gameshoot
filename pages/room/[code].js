@@ -51,6 +51,7 @@ export default function Room() {
   const [pressed, setPressed] = useState(false);
   const [toast, setToast] = useState('');
   const [gameOver, setGameOver] = useState(null);
+  const [bullets, setBullets] = useState([]);
 
   const channelRef = useRef(null);
   const stateRef = useRef({ x: myX, y: GROUND_Y, vy: 0, facing: myFacing });
@@ -119,6 +120,9 @@ export default function Room() {
         setOpHp(payload.hp);
         if (payload.hp === 0) setGameOver('win');
       })
+      .on('broadcast', { event: 'fire' }, ({ payload }) => {
+        spawnBullet(payload.x, payload.y, payload.facing, false);
+      })
       .subscribe();
 
     channelRef.current = gameChannel;
@@ -173,6 +177,14 @@ export default function Room() {
     inputRef.current[key] = value;
   }
 
+  function spawnBullet(x, y, facing, mine) {
+    const id = `${Date.now()}-${Math.random()}`;
+    setBullets((list) => [...list, { id, x, y, facing, mine }]);
+    setTimeout(() => {
+      setBullets((list) => list.filter((b) => b.id !== id));
+    }, 500);
+  }
+
   function fire() {
     if (gameOver) return;
     setPressed(true);
@@ -184,6 +196,13 @@ export default function Room() {
     const dy = Math.abs(op.y - s.y);
     const facingCorrect = (s.facing === 'right' && dx > 0) || (s.facing === 'left' && dx < 0);
     const inRange = Math.abs(dx) < HIT_RANGE_X && dy < HIT_RANGE_Y;
+
+    spawnBullet(s.x, s.y, s.facing, true);
+    channelRef.current?.send({
+      type: 'broadcast',
+      event: 'fire',
+      payload: { x: s.x, y: s.y, facing: s.facing },
+    });
 
     if (facingCorrect && inRange) {
       showToast('命中对手！');
@@ -288,6 +307,17 @@ export default function Room() {
         >
           <img src={opponent.img} alt={opponent.name} />
         </div>
+
+        {bullets.map((b) => (
+          <div
+            key={b.id}
+            className={`bullet ${b.facing === 'left' ? 'bullet-left' : 'bullet-right'}`}
+            style={{
+              left: b.x + AVATAR / 2,
+              bottom: b.y + AVATAR / 2,
+            }}
+          />
+        ))}
       </div>
 
       <div className="card">
